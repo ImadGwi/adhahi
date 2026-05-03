@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 adhahiGwi_bot — Wilaya Quota Monitor
-Polls adhahi.dz/api/v1/public/wilaya-quotas every 5 minutes.
+Polls adhahi.dz/api/v1/public/wilaya-quotas every 30 seconds.
 
-TEST_MODE = True  → alerts when a wilaya becomes UNAVAILABLE (available: false)
-TEST_MODE = False → alerts when a wilaya becomes AVAILABLE   (available: true)
+TEST_MODE       = True  → alerts when a wilaya becomes UNAVAILABLE (available: false)
+TEST_MODE       = False → alerts when a wilaya becomes AVAILABLE   (available: true)
+SEND_TEST_MSGS  = True  → sends a heartbeat message every 10s (for testing)
+SEND_TEST_MSGS  = False → silent, no heartbeat (production)
 """
 
 import asyncio
@@ -16,15 +18,21 @@ from telegram.error import TelegramError
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
-BOT_TOKEN   = "8609649170:AAEt2yiN9X6DSRm-v-dvxrDx9fYGXa0_S0w"
-CHATS_ID    = [2006244631, 1239935927, 1475463780]
-API_URL     = "https://adhahi.dz/api/v1/public/wilaya-quotas"
-INTERVAL    = 1 * 30          # seconds between polls (2 minutes)
+BOT_TOKEN       = "8609649170:AAEt2yiN9X6DSRm-v-dvxrDx9fYGXa0_S0w"
+CHATS_ID        = [2006244631, 1239935927, 1475463780]
+API_URL         = "https://adhahi.dz/api/v1/public/wilaya-quotas"
+INTERVAL        = 30           # seconds between polls
 
 # ── TEST MODE ──────────────────────────────────
 # True  → alert when available == False  (testing: easier to trigger)
 # False → alert when available == True   (production behaviour)
-TEST_MODE   = True
+TEST_MODE       = True
+
+# ── HEARTBEAT TEST MESSAGES ────────────────────
+# True  → sends "still alive" message every 10s
+# False → disabled (use in production)
+SEND_TEST_MSGS  = True
+TEST_MSG_INTERVAL = 10         # seconds between heartbeat messages
 
 # ── Wilayas to watch (hardcoded codes) ────────
 WATCHED_CODES = [
@@ -55,7 +63,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
-#  STATE  (tracks last known status per wilaya)
+#  STATE
 # ─────────────────────────────────────────────
 last_state: dict[str, bool | None] = {code: None for code in WATCHED_CODES}
 
@@ -64,7 +72,6 @@ last_state: dict[str, bool | None] = {code: None for code in WATCHED_CODES}
 #  HELPERS
 # ─────────────────────────────────────────────
 def fetch_quotas() -> list[dict] | None:
-    """Fetch quota list from API. Returns None on error."""
     try:
         resp = requests.get(API_URL, timeout=10)
         resp.raise_for_status()
@@ -75,7 +82,6 @@ def fetch_quotas() -> list[dict] | None:
 
 
 def build_message(wilaya: dict, trigger_value: bool) -> str:
-    """Build the Telegram notification message."""
     code    = wilaya["wilayaCode"]
     name_ar = wilaya.get("wilayaNameAr", "")
     name_fr = wilaya.get("wilayaNameFr", "")
@@ -105,27 +111,29 @@ async def broadcast(bot: Bot, message: str) -> None:
     for chat_id in CHATS_ID:
         try:
             await bot.send_message(chat_id=chat_id, text=message)
-            log.info("Alert sent to %s: %s", chat_id, message.splitlines()[0])
+            log.info("Sent to %s: %s", chat_id, message.splitlines()[0])
         except TelegramError as e:
-            log.error("Telegram send error to %s: %s", chat_id, e)
+            log.error("Telegram error to %s: %s", chat_id, e)
+
+
+# ─────────────────────────────────────────────
+#  HEARTBEAT TASK  (runs independently)
+# ─────────────────────────────────────────────
+async def heartbeat_loop(bot: Bot) -> None:
+    """Sends a test message every TEST_MSG_INTERVAL seconds if SEND_TEST_MSGS is True."""
+    counter = 0
+    while True:
+        await asyncio.sleep(TEST_MSG_INTERVAL)
+        counter += 1
+        msg = f"🟡 Heartbeat #{counter} — bot en vie, polling toutes les {INTERVAL}s"
+        await broadcast(bot, msg)
+        log.info("Heartbeat #%d sent", counter)
 
 
 # ─────────────────────────────────────────────
 #  MAIN POLL LOOP
 # ─────────────────────────────────────────────
-async def poll_loop() -> None:
-    bot = Bot(token=BOT_TOKEN)
-
-    mode_label = "🧪 TEST MODE (alerte si indisponible)" if TEST_MODE else "🚀 PRODUCTION (alerte si disponible)"
-    startup_msg = (
-        f"🤖 adhahiGwi_bot démarré\n"
-        f"Mode : {mode_label}\n"
-        f"Wilayas surveillées : {len(WATCHED_CODES)}\n"
-        f"Intervalle : toutes les 5 minutes"
-    )
-    await broadcast(bot, startup_msg)
-    log.info("Bot started — TEST_MODE=%s, watching %d wilayas", TEST_MODE, len(WATCHED_CODES))
-
+async def poll_loop(bot: Bot) -> None:
     watched_set = set(WATCHED_CODES)
 
     while True:
@@ -154,5 +162,29 @@ async def poll_loop() -> None:
 # ─────────────────────────────────────────────
 #  ENTRY POINT
 # ─────────────────────────────────────────────
+async def main() -> None:
+    bot = Bot(token=BOT_TOKEN)
+
+    mode_label = "🧪 TEST MODE (alerte si indisponible)" if TEST_MODE else "🚀 PRODUCTION (alerte si disponible)"
+    heartbeat_label = f"💓 Heartbeat toutes les {TEST_MSG_INTERVAL}s activé" if SEND_TEST_MSGS else "💤 Heartbeat désactivé"
+
+    startup_msg = (
+        f"🤖 adhahiGwi_bot démarré\n"
+        f"Mode : {mode_label}\n"
+        f"{heartbeat_label}\n"
+        f"Wilayas surveillées : {len(WATCHED_CODES)}\n"
+        f"Intervalle de polling : toutes les {INTERVAL}s"
+    )
+    await broadcast(bot, startup_msg)
+    log.info("Bot started — TEST_MODE=%s, SEND_TEST_MSGS=%s", TEST_MODE, SEND_TEST_MSGS)
+
+    tasks = [asyncio.create_task(poll_loop(bot))]
+
+    if SEND_TEST_MSGS:
+        tasks.append(asyncio.create_task(heartbeat_loop(bot)))
+
+    await asyncio.gather(*tasks)
+
+
 if __name__ == "__main__":
-    asyncio.run(poll_loop())
+    asyncio.run(main())
