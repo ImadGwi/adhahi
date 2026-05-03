@@ -1,40 +1,38 @@
 #!/usr/bin/env python3
 """
 adhahiGwi_bot — Wilaya Quota Monitor
-Polls adhahi.dz/api/v1/public/wilaya-quotas every 30 seconds.
 
 TEST_MODE       = True  → alerts when a wilaya becomes UNAVAILABLE (available: false)
 TEST_MODE       = False → alerts when a wilaya becomes AVAILABLE   (available: true)
-SEND_TEST_MSGS  = True  → sends a heartbeat message every 10s (for testing)
+SEND_TEST_MSGS  = True  → sends a heartbeat message every TEST_MSG_INTERVAL seconds
 SEND_TEST_MSGS  = False → silent, no heartbeat (production)
 """
 
 import asyncio
 import logging
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from telegram import Bot
 from telegram.error import TelegramError
 
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
-BOT_TOKEN       = "8609649170:AAEt2yiN9X6DSRm-v-dvxrDx9fYGXa0_S0w"
-CHATS_ID        = [2006244631, 1239935927, 1475463780]
-API_URL         = "https://adhahi.dz/api/v1/public/wilaya-quotas"
-INTERVAL        = 30           # seconds between polls
+BOT_TOKEN         = "8609649170:AAEt2yiN9X6DSRm-v-dvxrDx9fYGXa0_S0w"
+CHATS_ID          = [2006244631, 1239935927, 1475463780]
+API_URL           = "https://adhahi.dz/api/v1/public/wilaya-quotas"
+INTERVAL          = 30            # seconds between polls
+REQUEST_TIMEOUT   = 30            # seconds before giving up on HTTP request
 
 # ── TEST MODE ──────────────────────────────────
-# True  → alert when available == False  (testing: easier to trigger)
-# False → alert when available == True   (production behaviour)
-TEST_MODE       = True
+TEST_MODE         = True
 
-# ── HEARTBEAT TEST MESSAGES ────────────────────
-# True  → sends "still alive" message every 10s
-# False → disabled (use in production)
-SEND_TEST_MSGS  = True
-TEST_MSG_INTERVAL = 10         # seconds between heartbeat messages
+# ── HEARTBEAT ─────────────────────────────────
+SEND_TEST_MSGS    = True
+TEST_MSG_INTERVAL = 10
 
-# ── Wilayas to watch (hardcoded codes) ────────
+# ── Wilayas to watch ──────────────────────────
 WATCHED_CODES = [
     "01", "02", "03", "04", "05",
     "06", "07", "08", "09", "10",
@@ -63,6 +61,28 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
+#  HTTP SESSION WITH RETRY
+# ─────────────────────────────────────────────
+def make_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=2,          # waits 2s, 4s, 8s between retries
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (compatible; adhahiGwi-bot/1.0)",
+        "Accept": "application/json",
+    })
+    return session
+
+http = make_session()
+
+# ─────────────────────────────────────────────
 #  STATE
 # ─────────────────────────────────────────────
 last_state: dict[str, bool | None] = {code: None for code in WATCHED_CODES}
@@ -73,7 +93,7 @@ last_state: dict[str, bool | None] = {code: None for code in WATCHED_CODES}
 # ─────────────────────────────────────────────
 def fetch_quotas() -> list[dict] | None:
     try:
-        resp = requests.get(API_URL, timeout=10)
+        resp = http.get(API_URL, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
     except requests.RequestException as e:
@@ -107,7 +127,6 @@ def build_message(wilaya: dict, trigger_value: bool) -> str:
 
 
 async def broadcast(bot: Bot, message: str) -> None:
-    """Send a message to all chat IDs in CHATS_ID."""
     for chat_id in CHATS_ID:
         try:
             await bot.send_message(chat_id=chat_id, text=message)
@@ -117,10 +136,9 @@ async def broadcast(bot: Bot, message: str) -> None:
 
 
 # ─────────────────────────────────────────────
-#  HEARTBEAT TASK  (runs independently)
+#  HEARTBEAT TASK
 # ─────────────────────────────────────────────
 async def heartbeat_loop(bot: Bot) -> None:
-    """Sends a test message every TEST_MSG_INTERVAL seconds if SEND_TEST_MSGS is True."""
     counter = 0
     while True:
         await asyncio.sleep(TEST_MSG_INTERVAL)
@@ -147,7 +165,6 @@ async def poll_loop(bot: Bot) -> None:
 
                 current  = wilaya.get("available")
                 previous = last_state.get(code)
-
                 trigger_value = False if TEST_MODE else True
 
                 if current == trigger_value and previous != trigger_value:
@@ -165,7 +182,7 @@ async def poll_loop(bot: Bot) -> None:
 async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
 
-    mode_label = "🧪 TEST MODE (alerte si indisponible)" if TEST_MODE else "🚀 PRODUCTION (alerte si disponible)"
+    mode_label      = "🧪 TEST MODE (alerte si indisponible)" if TEST_MODE else "🚀 PRODUCTION (alerte si disponible)"
     heartbeat_label = f"💓 Heartbeat toutes les {TEST_MSG_INTERVAL}s activé" if SEND_TEST_MSGS else "💤 Heartbeat désactivé"
 
     startup_msg = (
@@ -173,13 +190,12 @@ async def main() -> None:
         f"Mode : {mode_label}\n"
         f"{heartbeat_label}\n"
         f"Wilayas surveillées : {len(WATCHED_CODES)}\n"
-        f"Intervalle de polling : toutes les {INTERVAL}s"
+        f"Polling toutes les {INTERVAL}s — timeout {REQUEST_TIMEOUT}s"
     )
     await broadcast(bot, startup_msg)
     log.info("Bot started — TEST_MODE=%s, SEND_TEST_MSGS=%s", TEST_MODE, SEND_TEST_MSGS)
 
     tasks = [asyncio.create_task(poll_loop(bot))]
-
     if SEND_TEST_MSGS:
         tasks.append(asyncio.create_task(heartbeat_loop(bot)))
 
