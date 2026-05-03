@@ -18,7 +18,7 @@ from telegram.error import TelegramError
 # ─────────────────────────────────────────────
 BOT_TOKEN   = "8609649170:AAEt2yiN9X6DSRm-v-dvxrDx9fYGXa0_S0w"
 CHAT_ID     = 2006244631
-API_URL     = "http://localhost:5001/api/v1/public/wilaya-quotas"
+API_URL     = "https://adhahi.dz/api/v1/public/wilaya-quotas"
 INTERVAL    = 5 * 60          # seconds between polls (5 minutes)
 
 # ── TEST MODE ──────────────────────────────────
