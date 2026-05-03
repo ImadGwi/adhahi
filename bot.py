@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 adhahiGwi_bot — Wilaya Quota Monitor
-Polls localhost:5001/api/v1/public/wilaya-quotas every 5 minutes.
+Polls adhahi.dz/api/v1/public/wilaya-quotas every 5 minutes.
 
 TEST_MODE = True  → alerts when a wilaya becomes UNAVAILABLE (available: false)
 TEST_MODE = False → alerts when a wilaya becomes AVAILABLE   (available: true)
@@ -17,9 +17,9 @@ from telegram.error import TelegramError
 #  CONFIG
 # ─────────────────────────────────────────────
 BOT_TOKEN   = "8609649170:AAEt2yiN9X6DSRm-v-dvxrDx9fYGXa0_S0w"
-CHAT_ID     = 2006244631
+CHATS_ID    = [2006244631, 1239935927, 1475463780]
 API_URL     = "https://adhahi.dz/api/v1/public/wilaya-quotas"
-INTERVAL    = 5 * 60          # seconds between polls (5 minutes)
+INTERVAL    = 1 * 30          # seconds between polls (2 minutes)
 
 # ── TEST MODE ──────────────────────────────────
 # True  → alert when available == False  (testing: easier to trigger)
@@ -57,7 +57,6 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 #  STATE  (tracks last known status per wilaya)
 # ─────────────────────────────────────────────
-# None = not yet seen, True/False = last known value of `available`
 last_state: dict[str, bool | None] = {code: None for code in WATCHED_CODES}
 
 
@@ -65,7 +64,7 @@ last_state: dict[str, bool | None] = {code: None for code in WATCHED_CODES}
 #  HELPERS
 # ─────────────────────────────────────────────
 def fetch_quotas() -> list[dict] | None:
-    """Fetch quota list from local API. Returns None on error."""
+    """Fetch quota list from API. Returns None on error."""
     try:
         resp = requests.get(API_URL, timeout=10)
         resp.raise_for_status()
@@ -77,15 +76,15 @@ def fetch_quotas() -> list[dict] | None:
 
 def build_message(wilaya: dict, trigger_value: bool) -> str:
     """Build the Telegram notification message."""
-    code = wilaya["wilayaCode"]
+    code    = wilaya["wilayaCode"]
     name_ar = wilaya.get("wilayaNameAr", "")
     name_fr = wilaya.get("wilayaNameFr", "")
 
-    if trigger_value:          # available just became True  (production)
+    if trigger_value:
         emoji  = "✅"
         status = "DISPONIBLE"
         label  = "Un poste est maintenant ouvert !"
-    else:                      # available just became False (test mode)
+    else:
         emoji  = "🔴"
         status = "INDISPONIBLE"
         label  = "Le poste vient de fermer."
@@ -93,6 +92,7 @@ def build_message(wilaya: dict, trigger_value: bool) -> str:
     mode_tag = "🧪 TEST MODE\n" if TEST_MODE else ""
 
     return (
+        f"IF YOU SEE THIS MESSAGE, 3Ayti l Imad 5okm :)\n"
         f"{mode_tag}"
         f"{emoji} Wilaya {code} — {name_fr} / {name_ar}\n"
         f"Statut : {status}\n"
@@ -100,12 +100,14 @@ def build_message(wilaya: dict, trigger_value: bool) -> str:
     )
 
 
-async def send_alert(bot: Bot, message: str) -> None:
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text=message)
-        log.info("Alert sent: %s", message.splitlines()[0])
-    except TelegramError as e:
-        log.error("Telegram send error: %s", e)
+async def broadcast(bot: Bot, message: str) -> None:
+    """Send a message to all chat IDs in CHATS_ID."""
+    for chat_id in CHATS_ID:
+        try:
+            await bot.send_message(chat_id=chat_id, text=message)
+            log.info("Alert sent to %s: %s", chat_id, message.splitlines()[0])
+        except TelegramError as e:
+            log.error("Telegram send error to %s: %s", chat_id, e)
 
 
 # ─────────────────────────────────────────────
@@ -114,17 +116,14 @@ async def send_alert(bot: Bot, message: str) -> None:
 async def poll_loop() -> None:
     bot = Bot(token=BOT_TOKEN)
 
-    # Startup message
     mode_label = "🧪 TEST MODE (alerte si indisponible)" if TEST_MODE else "🚀 PRODUCTION (alerte si disponible)"
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text=(
-            f"🤖 adhahiGwi_bot démarré\n"
-            f"Mode : {mode_label}\n"
-            f"Wilayas surveillées : {len(WATCHED_CODES)}\n"
-            f"Intervalle : toutes les 5 minutes"
-        ),
+    startup_msg = (
+        f"🤖 adhahiGwi_bot démarré\n"
+        f"Mode : {mode_label}\n"
+        f"Wilayas surveillées : {len(WATCHED_CODES)}\n"
+        f"Intervalle : toutes les 5 minutes"
     )
+    await broadcast(bot, startup_msg)
     log.info("Bot started — TEST_MODE=%s, watching %d wilayas", TEST_MODE, len(WATCHED_CODES))
 
     watched_set = set(WATCHED_CODES)
@@ -138,16 +137,14 @@ async def poll_loop() -> None:
                 if code not in watched_set:
                     continue
 
-                current = wilaya.get("available")          # True or False
-                previous = last_state.get(code)            # None or bool
+                current  = wilaya.get("available")
+                previous = last_state.get(code)
 
-                # Determine what value should trigger an alert
                 trigger_value = False if TEST_MODE else True
 
-                # Alert only on a real state CHANGE to the trigger value
                 if current == trigger_value and previous != trigger_value:
                     msg = build_message(wilaya, trigger_value)
-                    await send_alert(bot, msg)
+                    await broadcast(bot, msg)
 
                 last_state[code] = current
 
